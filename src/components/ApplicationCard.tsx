@@ -2,6 +2,8 @@
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowUpRight } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { useNavigate } from "react-router-dom";
 
 interface ApplicationCardProps {
   title: string;
@@ -11,6 +13,18 @@ interface ApplicationCardProps {
 }
 
 export function ApplicationCard({ title, description, link, thumbnail }: ApplicationCardProps) {
+  const { isAuthenticated } = useAuth();
+  const navigate = useNavigate();
+
+  const handleOpenApplication = () => {
+    if (!isAuthenticated) {
+      localStorage.setItem('redirectAfterLogin', window.location.pathname);
+      navigate('/login');
+    } else {
+      window.open(link, "_blank");
+    }
+  };
+
   return (
     <Card className="group relative overflow-hidden p-6 glass transition-all duration-300 hover:scale-[1.02] animate-scale-in">
       <div className="relative z-10 flex h-full flex-col gap-4">
@@ -30,7 +44,7 @@ export function ApplicationCard({ title, description, link, thumbnail }: Applica
         <div className="mt-auto pt-4">
           <Button
             className="gap-2"
-            onClick={() => window.open(link, "_blank")}
+            onClick={handleOpenApplication}
           >
             Open Application
             <ArrowUpRight className="h-4 w-4" />
