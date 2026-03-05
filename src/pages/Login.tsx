@@ -1,107 +1,170 @@
+import React, { useEffect, useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { useAuth } from "@/contexts/AuthContext";
 
-import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { ThemeToggle } from '@/components/ThemeToggle';
-import { useAuth } from '@/contexts/AuthContext';
-import { Eye, EyeOff } from 'lucide-react';
-
-const Login = () => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const { login } = useAuth();
+const Login: React.FC = () => {
+  const { sendOTP, verifyOTP, isAuthenticated } = useAuth();
   const navigate = useNavigate();
+  const [step, setStep] = useState<"email" | "otp">("email");
+  const [email, setEmail] = useState("");
+  const [otp, setOtp] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsLoading(true);
-    
-    const success = await login(email, password);
-    if (success) {
-      const redirectUrl = localStorage.getItem('redirectAfterLogin') || '/';
-      localStorage.removeItem('redirectAfterLogin');
-      navigate(redirectUrl);
+  useEffect(() => {
+    // INVEST-style: allow apps to send user to DIGI with a redirect back
+    const params = new URLSearchParams(window.location.search);
+    const redirect = params.get("redirect");
+    const emailParam = params.get("email");
+
+    if (redirect) {
+      localStorage.setItem("redirectAfterLogin", redirect);
     }
-    
-    setIsLoading(false);
+
+    // Optional: prefill email (Audit sends ?email=...)
+    if (emailParam) {
+      setEmail((prev) => (prev?.trim() ? prev : emailParam));
+    }
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const goAfterLogin = () => {
+    // Check URL params first
+    const urlParams = new URLSearchParams(window.location.search);
+    const returnToParam = urlParams.get("returnTo");
+    const appParam = urlParams.get("app");
+
+    const redirectUrl =
+      returnToParam || localStorage.getItem("redirectAfterLogin") || "/";
+    localStorage.removeItem("redirectAfterLogin"); // Clear after use
+    sessionStorage.removeItem("redirectAfterLogin"); // Clear from session storage too
+
+    // IMPORTANT: support full absolute URLs (cross-app redirect)
+    if (/^https?:\/\//i.test(redirectUrl)) {
+      window.location.replace(redirectUrl);
+      return;
+    }
+
+    navigate(redirectUrl, { replace: true });
+  };
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      goAfterLogin();
+    }
+  }, [isAuthenticated, navigate]);
+
+  const onSend = async () => {
+    if (!email.trim()) return;
+    setLoading(true);
+    const ok = await sendOTP(email.trim());
+    setLoading(false);
+    if (ok) {
+      setStep("otp");
+      setCooldown(45);
+    }
+  };
+
+  const onVerify = async () => {
+    if (!email.trim() || otp.trim().length !== 6) return;
+    setLoading(true);
+    const ok = await verifyOTP(email.trim(), otp.trim());
+    setLoading(false);
+    if (ok) {
+      goAfterLogin();
+    }
   };
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
-      <ThemeToggle />
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
       <Card className="w-full max-w-md p-8 glass animate-fade-in">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold">Welcome Back</h1>
-          <p className="text-muted-foreground mt-2">Sign in to your account</p>
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-semibold">
+            Premier Energies Digital Portal
+          </h1>
+          <p className="text-muted-foreground mt-2">
+            Sign in with your email OTP
+          </p>
         </div>
-        
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="space-y-2">
-            <Label htmlFor="email">Email</Label>
-            <Input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              placeholder="Enter your email"
-              className="transition-all duration-300 focus:scale-[1.02]"
-            />
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
-            <div className="relative">
+
+        {step === "email" ? (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="email">Email (premierenergies.com)</Label>
               <Input
-                id="password"
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                placeholder="Enter your password"
-                className="transition-all duration-300 focus:scale-[1.02] pr-10"
+                id="email"
+                type="email"
+                placeholder="name@premierenergies.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={loading}
               />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
-                onClick={() => setShowPassword(!showPassword)}
-              >
-                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </Button>
+            </div>
+            <Button
+              className="w-full"
+              onClick={onSend}
+              disabled={loading || !email}
+            >
+              {loading ? "Sending..." : "Send OTP"}
+            </Button>
+            <div className="text-xs text-muted-foreground">
+              By continuing, you agree to our acceptable use & security
+              policies.
             </div>
           </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="otp">Enter 6-digit OTP</Label>
+              <Input
+                id="otp"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={6}
+                placeholder="123456"
+                value={otp}
+                onChange={(e) =>
+                  setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+                }
+                disabled={loading}
+              />
+            </div>
 
-          <Button 
-            type="submit" 
-            className="w-full transition-all duration-300 hover:scale-105"
-            disabled={isLoading}
-          >
-            {isLoading ? 'Signing In...' : 'Sign In'}
-          </Button>
-        </form>
+            <Button
+              className="w-full"
+              onClick={onVerify}
+              disabled={loading || otp.length !== 6}
+            >
+              {loading ? "Verifying..." : "Verify & Sign In"}
+            </Button>
 
-        <div className="mt-6 text-center space-y-4">
-          <Link 
-            to="/reset-password" 
-            className="text-sm text-primary hover:underline transition-colors"
-          >
-            Forgot your password?
-          </Link>
-          
-          <div className="text-sm text-muted-foreground">
-            Don't have an account?{' '}
-            <Link to="/register" className="text-primary hover:underline transition-colors">
-              Sign up
-            </Link>
+            <div className="flex items-center justify-between text-sm">
+              <button
+                className="text-primary disabled:opacity-50"
+                onClick={onSend}
+                disabled={cooldown > 0 || loading}
+                type="button"
+              >
+                Resend OTP {cooldown > 0 ? `(${cooldown})` : ""}
+              </button>
+              <Link to="/login" className="text-muted-foreground">
+                Use a different email
+              </Link>
+            </div>
           </div>
-        </div>
+        )}
       </Card>
     </div>
   );

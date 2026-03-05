@@ -1,203 +1,241 @@
+import React, { createContext, useContext, useEffect, useState } from "react";
+import { toast } from "@/hooks/use-toast";
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { toast } from '@/hooks/use-toast';
-
-interface User {
-  email: string;
+type User = {
   id: string;
+  email: string;
+  roles?: string[];
+  apps?: string[];
+  isAdmin?: boolean;
+};
+
+type AuthContextType = {
+  user: User | null;
+  ready: boolean;
+  isAuthenticated: boolean;
+  sendOTP: (email: string) => Promise<boolean>;
+  verifyOTP: (email: string, otp: string) => Promise<boolean>;
+  fetchSession: () => Promise<void>;
+  logout: () => Promise<void>;
+};
+
+const IST_OFFSET_MS = 330 * 60 * 1000; // +05:30
+const IST_DAY_KEY = "digi_last_ist_day";
+
+function istDayString(now = new Date()) {
+  // Convert "now" to IST by shifting epoch, then read YYYY-MM-DD from ISO
+  return new Date(now.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
-interface AuthContextType {
-  user: User | null;
-  login: (email: string, password: string) => Promise<boolean>;
-  register: (email: string, password: string) => Promise<boolean>;
-  logout: () => void;
-  isAuthenticated: boolean;
-  sendOTP: (email: string) => Promise<string>;
-  verifyOTP: (email: string, otp: string) => boolean;
-  resetPassword: (email: string, newPassword: string) => boolean;
+function msUntilNextIstMidnight(now = new Date()) {
+  const nowUtcMs = now.getTime();
+  const ist = new Date(nowUtcMs + IST_OFFSET_MS);
+
+  // Using getUTC* because `ist` is already shifted to IST epoch
+  const y = ist.getUTCFullYear();
+  const m = ist.getUTCMonth();
+  const d = ist.getUTCDate();
+
+  // Next midnight IST => (UTC midnight of next IST day) minus IST offset
+  const nextMidnightUtcMs = Date.UTC(y, m, d + 1, 0, 0, 0, 0) - IST_OFFSET_MS;
+
+  return Math.max(0, nextMidnightUtcMs - nowUtcMs);
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [ready, setReady] = useState(false);
+
+// CMD+F: const fetchSession = async () => {
+  const fetchSession = async () => {
+    try {
+      const doSession = async () => fetch("/api/session", { credentials: "include" });
+  
+      let r = await doSession();
+  
+      // If access token expired but refresh cookie exists, refresh once then retry
+      if (r.status === 401) {
+        const rr = await fetch("/auth/refresh", {
+          method: "POST",
+          credentials: "include",
+        }).catch(() => null);
+  
+        if (rr && rr.ok) {
+          r = await doSession();
+        }
+      }
+  
+      if (r.ok) {
+        const data = await r.json();
+        localStorage.setItem(IST_DAY_KEY, istDayString());
+        setUser(data.user);
+      } else {
+        localStorage.removeItem(IST_DAY_KEY);
+        setUser(null);
+      }
+    } catch {
+      localStorage.removeItem(IST_DAY_KEY);
+      setUser(null);
+    } finally {
+      setReady(true);
+    }
+  };
+  
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('currentUser');
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
+    fetchSession();
   }, []);
 
-  const sendOTP = async (email: string): Promise<string> => {
-    const otp = Math.random().toString().slice(2, 8);
-    const otpData = {
-      otp,
-      email,
-      timestamp: Date.now(),
-      expires: Date.now() + 5 * 60 * 1000 // 5 minutes
-    };
-    
-    localStorage.setItem(`otp_${email}`, JSON.stringify(otpData));
-    
-    // Show OTP in toast for demo purposes
-    toast({
-      title: "OTP Sent",
-      description: `Your OTP is: ${otp}`,
-      duration: 10000,
-    });
-    
-    return otp;
-  };
+  // Auto-logout at IST midnight (and also on focus/visibility if day changed)
+  // CMD+F: // Auto-logout at IST midnight (and also on focus/visibility if day changed)
+  useEffect(() => {
+    if (!user) return;
 
-  const verifyOTP = (email: string, otp: string): boolean => {
-    const savedOTP = localStorage.getItem(`otp_${email}`);
-    if (!savedOTP) return false;
-    
-    const otpData = JSON.parse(savedOTP);
-    
-    if (Date.now() > otpData.expires) {
-      localStorage.removeItem(`otp_${email}`);
+    const key = IST_DAY_KEY;
+
+    const checkDayAndLogoutIfNeeded = async () => {
+      const today = istDayString();
+      const last = localStorage.getItem(key);
+
+      // If day changed while tab was inactive/sleeping => force logout
+      if (last && last !== today) {
+        await logout();
+        toast({
+          title: "Session expired",
+          description: "Signed out automatically at midnight (IST).",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      localStorage.setItem(key, today);
+    };
+
+    // Set initial day stamp + check once
+    checkDayAndLogoutIfNeeded();
+
+    // Timer to midnight IST
+    const t = window.setTimeout(async () => {
+      await logout();
+      toast({
+        title: "Session expired",
+        description: "Signed out automatically at midnight (IST).",
+        variant: "destructive",
+      });
+    }, msUntilNextIstMidnight());
+
+    // Extra safety when user returns to the tab
+    const onFocus = () => checkDayAndLogoutIfNeeded();
+    const onVis = () => {
+      if (document.visibilityState === "visible") checkDayAndLogoutIfNeeded();
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  const sendOTP = async (email: string): Promise<boolean> => {
+    try {
+      const r = await fetch("/api/send-otp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email }),
+      });
+      if (r.ok) {
+        toast({
+          title: "OTP sent",
+          description: `An OTP has been emailed to ${email}`,
+        });
+        return true;
+      }
+      const e = await r.json().catch(() => ({}));
+      toast({
+        title: "Failed to send OTP",
+        description: e?.message || "Try again",
+        variant: "destructive",
+      });
+      return false;
+    } catch (e) {
+      toast({
+        title: "Network error",
+        description: "Could not send OTP",
+        variant: "destructive",
+      });
       return false;
     }
-    
-    if (otpData.otp === otp) {
-      localStorage.removeItem(`otp_${email}`);
-      return true;
-    }
-    
-    return false;
   };
 
-  const register = async (email: string, password: string): Promise<boolean> => {
+  const verifyOTP = async (email: string, otp: string): Promise<boolean> => {
     try {
-      const users = JSON.parse(localStorage.getItem('users') || '[]');
-      
-      if (users.find((u: any) => u.email === email)) {
+      const r = await fetch("/api/verify-otp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email, otp }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
         toast({
-          title: "Registration Failed",
-          description: "User already exists",
+          title: "Invalid OTP",
+          description: e?.message || "Please try again",
           variant: "destructive",
         });
         return false;
       }
-
-      const newUser = {
-        id: Date.now().toString(),
-        email,
-        password
-      };
-
-      users.push(newUser);
-      localStorage.setItem('users', JSON.stringify(users));
-      
-      const userSession = { email, id: newUser.id };
-      setUser(userSession);
-      localStorage.setItem('currentUser', JSON.stringify(userSession));
-      
+      await fetchSession();
       toast({
-        title: "Registration Successful",
+        title: "Signed in",
         description: "Welcome to Premier Energies Digital Portal",
       });
-      
       return true;
-    } catch (error) {
+    } catch {
       toast({
-        title: "Registration Failed",
-        description: "An error occurred during registration",
+        title: "Network error",
+        description: "Could not verify OTP",
         variant: "destructive",
       });
       return false;
     }
   };
 
-  const login = async (email: string, password: string): Promise<boolean> => {
+  // CMD+F: const logout = async () => {
+  const logout = async () => {
     try {
-      const users = JSON.parse(localStorage.getItem('users') || '[]');
-      const foundUser = users.find((u: any) => u.email === email && u.password === password);
-      
-      if (foundUser) {
-        const userSession = { email, id: foundUser.id };
-        setUser(userSession);
-        localStorage.setItem('currentUser', JSON.stringify(userSession));
-        
-        toast({
-          title: "Login Successful",
-          description: "Welcome back!",
-        });
-        
-        return true;
-      } else {
-        toast({
-          title: "Login Failed",
-          description: "Invalid email or password",
-          variant: "destructive",
-        });
-        return false;
-      }
-    } catch (error) {
-      toast({
-        title: "Login Failed",
-        description: "An error occurred during login",
-        variant: "destructive",
-      });
-      return false;
-    }
-  };
-
-  const logout = () => {
+      await fetch("/auth/logout", { method: "POST", credentials: "include" });
+    } catch {}
+    localStorage.removeItem(IST_DAY_KEY);
     setUser(null);
-    localStorage.removeItem('currentUser');
-    toast({
-      title: "Logged Out",
-      description: "You have been successfully logged out",
-    });
-  };
-
-  const resetPassword = (email: string, newPassword: string): boolean => {
-    try {
-      const users = JSON.parse(localStorage.getItem('users') || '[]');
-      const userIndex = users.findIndex((u: any) => u.email === email);
-      
-      if (userIndex !== -1) {
-        users[userIndex].password = newPassword;
-        localStorage.setItem('users', JSON.stringify(users));
-        
-        toast({
-          title: "Password Reset",
-          description: "Your password has been successfully updated",
-        });
-        
-        return true;
-      }
-      
-      return false;
-    } catch (error) {
-      return false;
-    }
   };
 
   return (
-    <AuthContext.Provider value={{
-      user,
-      login,
-      register,
-      logout,
-      isAuthenticated: !!user,
-      sendOTP,
-      verifyOTP,
-      resetPassword
-    }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        ready,
+        isAuthenticated: !!user,
+        sendOTP,
+        verifyOTP,
+        fetchSession,
+        logout,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
 }
 
 export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
+  return ctx;
 };
